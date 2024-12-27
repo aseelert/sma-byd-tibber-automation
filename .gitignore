@@ -1,5 +1,8 @@
 # Python
 __pycache__/
+.pytest_cache
+cache/
+venv312
 *.py[cod]
 *$py.class
 *.so
