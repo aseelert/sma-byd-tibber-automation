@@ -10,11 +10,11 @@
 <body >
     <style>.box { justify-content:center; display:flex; flex-wrap:wrap;  } </style>
     <div class="box">
-                <div id="d62ac273658e4152aff38ccbefbf0514" class="chart-container" style="width:1200px; height:600px; "></div>
+                <div id="a2b5933cbe9c44aa87c536c02ce42f54" class="chart-container" style="width:1200px; height:600px; "></div>
     <script>
-        var chart_d62ac273658e4152aff38ccbefbf0514 = echarts.init(
-            document.getElementById('d62ac273658e4152aff38ccbefbf0514'), 'white', {renderer: 'canvas'});
-        var option_d62ac273658e4152aff38ccbefbf0514 = {
+        var chart_a2b5933cbe9c44aa87c536c02ce42f54 = echarts.init(
+            document.getElementById('a2b5933cbe9c44aa87c536c02ce42f54'), 'white', {renderer: 'canvas'});
+        var option_a2b5933cbe9c44aa87c536c02ce42f54 = {
     "animation": true,
     "animationThreshold": 2000,
     "animationDuration": 1000,
@@ -43,29 +43,42 @@
             "name": "Price (\u20ac cents/kWh)",
             "legendHoverLink": true,
             "data": [
-                27.99,
-                27.93,
-                27.779999999999998,
-                27.76,
-                28.549999999999997,
-                29.68,
-                30.7,
-                31.6,
-                31.4,
-                30.2,
-                28.76,
-                28.74,
-                28.76,
-                30.39,
-                32.15,
-                33.32,
-                33.98,
-                34.760000000000005,
-                33.339999999999996,
-                31.759999999999998,
-                30.84,
-                31.0,
-                29.48
+                25.46,
+                26.179999999999996,
+                26.27,
+                25.869999999999997,
+                25.3,
+                25.77,
+                25.490000000000002,
+                25.869999999999997,
+                26.91,
+                27.450000000000003,
+                28.999999999999996,
+                27.810000000000002,
+                26.22,
+                24.82,
+                24.01,
+                23.919999999999998,
+                20.16,
+                21.92,
+                21.37,
+                22.63,
+                22.7,
+                23.52,
+                23.49,
+                23.49,
+                24.44,
+                25.240000000000002,
+                25.840000000000003,
+                25.729999999999997,
+                25.55,
+                25.569999999999997,
+                25.3,
+                25.06,
+                25.679999999999996,
+                25.869999999999997,
+                25.82,
+                25.16
             ],
             "realtimeSort": false,
             "showBackground": false,
@@ -101,10 +114,10 @@
                     {
                         "name": "Lowest Future",
                         "coord": [
-                            "13:00",
-                            28.76
+                            "23:00",
+                            20.16
                         ],
-                        "value": "28.8\u00a2",
+                        "value": "20.2\u00a2",
                         "symbol_size": 35,
                         "itemStyle": {
                             "color": "#2ecc71"
@@ -113,7 +126,7 @@
                 ]
             },
             "itemStyle": {
-                "color": function(params) {                        var colors = ['#cccccc', '#cccccc', '#cccccc', '#cccccc', '#cccccc', '#cccccc', '#cccccc', '#cccccc', '#cccccc', '#cccccc', '#cccccc', '#cccccc', '#f1c40f', '#f1c40f', '#f1c40f', '#e67e22', '#e67e22', '#e67e22', '#e67e22', '#2ecc71', '#2ecc71', '#2ecc71', '#2ecc71'];                        return colors[params.dataIndex];                    }
+                "color": function(params) {                        var colors = ['#cccccc', '#cccccc', '#cccccc', '#cccccc', '#cccccc', '#cccccc', '#cccccc', '#cccccc', '#cccccc', '#cccccc', '#cccccc', '#cccccc', '#f1c40f', '#2ecc71', '#2ecc71', '#2ecc71', '#2ecc71', '#2ecc71', '#2ecc71', '#2ecc71', '#2ecc71', '#2ecc71', '#2ecc71', '#2ecc71', '#2ecc71', '#f1c40f', '#f1c40f', '#f1c40f', '#f1c40f', '#f1c40f', '#f1c40f', '#f1c40f', '#f1c40f', '#f1c40f', '#f1c40f', '#f1c40f'];                        return colors[params.dataIndex];                    }
             }
         }
     ],
@@ -207,6 +220,24 @@
             "animationEasingUpdate": "cubicOut",
             "animationDelayUpdate": 0,
             "data": [
+                "07:00",
+                "08:00",
+                "09:00",
+                "10:00",
+                "11:00",
+                "12:00",
+                "13:00",
+                "14:00",
+                "15:00",
+                "16:00",
+                "17:00",
+                "18:00",
+                "19:00",
+                "20:00",
+                "21:00",
+                "22:00",
+                "23:00",
+                "00:00",
                 "01:00",
                 "02:00",
                 "03:00",
@@ -224,12 +255,7 @@
                 "15:00",
                 "16:00",
                 "17:00",
-                "18:00",
-                "19:00",
-                "20:00",
-                "21:00",
-                "22:00",
-                "23:00"
+                "18:00"
             ]
         }
     ],
@@ -277,7 +303,7 @@
             "show": true,
             "text": "Energy Prices",
             "target": "blank",
-            "subtext": "Best future charging window: 20:00 - 00:00\nAverage price: 30.8 cents/kWh",
+            "subtext": "Best future charging window: 23:00 - 03:00\nAverage price: 21.5 cents/kWh",
             "subtarget": "blank",
             "left": "center",
             "padding": 5,
@@ -323,7 +349,7 @@
         }
     ]
 };
-        chart_d62ac273658e4152aff38ccbefbf0514.setOption(option_d62ac273658e4152aff38ccbefbf0514);
+        chart_a2b5933cbe9c44aa87c536c02ce42f54.setOption(option_a2b5933cbe9c44aa87c536c02ce42f54);
     </script>
 <br/>    </div>
     <script>

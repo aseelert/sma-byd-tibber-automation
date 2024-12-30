@@ -51,3 +51,15 @@ htmlcov/
 # System
 .DS_Store
 Thumbs.db
+
+# Virtual Environment
+venv/
+venv312/
+ENV/
+
+# Project specific
+cache/
+data/
+*.json
+energy_forecast.html
+.env
