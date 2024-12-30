@@ -147,7 +147,7 @@ class SmartEnergyController:
             if not self.sma_client or not self.sma_client.connected:
                 await self.connect_sma()
 
-            # Try both address variants
+            # Try both address variants as in sma_modbus.py
             for base_adjust in [0, -1]:
                 address = register_addr + base_adjust
                 self.log_register_debug(
@@ -155,32 +155,32 @@ class SmartEnergyController:
                     level=DebugLevel.DETAILED
                 )
 
-                result = self.sma_client.read_holding_registers(
-                    address=address,
-                    count=count,
-                    slave=self.sma_unit_id
-                )
+                try:
+                    result = self.sma_client.read_holding_registers(
+                        address=address,
+                        count=count,
+                        slave=self.sma_unit_id
+                    )
 
-                if not result:
+                    if result and not result.isError():
+                        self.log_register_debug(
+                            f"Successfully read register {register_addr} at address {address}:",
+                            result.registers,
+                            DebugLevel.TRACE
+                        )
+                        return result.registers
+
                     self.log_register_debug(
-                        f"No response from register {register_addr} at address {address}",
+                        f"Failed attempt at address {address}: {result if result else 'No response'}",
+                        level=DebugLevel.DETAILED
+                    )
+
+                except Exception as e:
+                    self.log_register_debug(
+                        f"Error trying address {address}: {e}",
                         level=DebugLevel.DETAILED
                     )
                     continue
-
-                if result.isError():
-                    self.log_register_debug(
-                        f"Error reading register {register_addr} at address {address}: {result}",
-                        level=DebugLevel.DETAILED
-                    )
-                    continue
-
-                self.log_register_debug(
-                    f"Successfully read register {register_addr} at address {address}:",
-                    result.registers,
-                    DebugLevel.TRACE
-                )
-                return result.registers
 
             logger.error(f"Failed to read register {register_addr} with all address variants")
             return None
@@ -298,28 +298,50 @@ class SmartEnergyController:
             soc_registers = await self.read_sma_register(self.registers['battery_soc'])
             soc = self.decode_u32(soc_registers) if soc_registers else 0
 
+            if self.debug_level >= DebugLevel.DETAILED:
+                logger.debug(f"Raw SoC registers: {soc_registers}")
+                logger.debug(f"Decoded SoC: {soc}%")
+
             # Read grid power (signed 32-bit)
-            power_registers = await self.read_sma_register(30865)  # Grid power exchange
+            power_registers = await self.read_sma_register(self.registers['grid_power'])
             power = self.decode_s32(power_registers) if power_registers else 0
 
+            if self.debug_level >= DebugLevel.DETAILED:
+                logger.debug(f"Raw power registers: {power_registers}")
+                logger.debug(f"Decoded power: {power}W")
+
             # Read mode register (single register)
-            mode_registers = await self.read_sma_register(40151, count=1)
-            mode_value = mode_registers[0] if mode_registers else 803  # Default to NORMAL mode
+            mode_registers = await self.read_sma_register(self.registers['battery_mode'], count=1)
+            mode_value = mode_registers[0] if mode_registers else BatteryMode.NORMAL.value
 
-            # Ensure mode_value maps to a valid BatteryMode
-            if mode_value not in [mode.value for mode in BatteryMode]:
-                mode_value = BatteryMode.NORMAL.value
+            if self.debug_level >= DebugLevel.DETAILED:
+                logger.debug(f"Raw mode register: {mode_registers}")
+                logger.debug(f"Mode value: {mode_value}")
 
-            return BatteryStatus(
+            # Map mode value to BatteryMode
+            try:
+                mode = BatteryMode(mode_value)
+            except ValueError:
+                logger.warning(f"Invalid mode value {mode_value}, defaulting to NORMAL")
+                mode = BatteryMode.NORMAL
+
+            status = BatteryStatus(
                 soc=soc,
                 power=power,
-                mode=BatteryMode(mode_value),
+                mode=mode,
                 target_power=self.charge_power,
                 is_charging=power > 0 if power is not None else False,
-                temperature=0  # Temperature not available in sma_modbus.py
+                temperature=0  # Temperature not available
             )
+
+            if self.debug_level >= DebugLevel.BASIC:
+                logger.info(f"Battery Status: SoC={status.soc}%, Power={status.power}W, Mode={status.mode.name}")
+
+            return status
+
         except Exception as e:
             logger.error(f"Error getting battery status: {e}")
+            logger.exception("Detailed error trace:") if self.debug_level >= DebugLevel.DETAILED else None
             return None
 
     def find_best_charging_window(self, prices: List[Dict], hours_needed: int = 4) -> Dict:
@@ -426,10 +448,16 @@ class SmartEnergyController:
     async def set_battery_mode(self, mode: BatteryMode, power: int = 0):
         """Set battery mode and power with correct register values"""
         try:
-            # First set the mode register (40151)
+            self.log_register_debug(
+                "Setting battery mode:",
+                [0, mode.value],
+                DebugLevel.DETAILED
+            )
+
+            # First set the mode register (40151) with exact values [0, 802/803]
             mode_result = await self.write_sma_register(
                 self.registers['battery_mode'],
-                [0, mode.value]  # Format: [high_byte=0, low_byte=mode]
+                [0, mode.value]  # Exactly as in HA: [0, 802] for charging/pause, [0, 803] for normal
             )
 
             if not mode_result:
@@ -440,14 +468,25 @@ class SmartEnergyController:
 
             # Then set the power register (40149)
             if mode == BatteryMode.GRID_CHARGE:
-                # For charging: 65535 - desired_power
+                # For charging: [65535, (65535 - power)] exactly as in HA
                 power_value = [65535, 65535 - power]
-            elif mode == BatteryMode.NORMAL:
-                # Normal mode doesn't need power setting
-                return True
-            else:
-                # For pause or other modes: 0
+                self.log_register_debug(
+                    f"Setting charge power to {power}W:",
+                    power_value,
+                    DebugLevel.DETAILED
+                )
+            elif mode == BatteryMode.PAUSE:
+                # For pause: [0, 0] exactly as in HA
                 power_value = [0, 0]
+                self.log_register_debug(
+                    "Setting power to pause mode:",
+                    power_value,
+                    DebugLevel.DETAILED
+                )
+            else:
+                # Normal mode doesn't need power setting
+                logger.debug("Normal mode - no power setting needed")
+                return True
 
             power_result = await self.write_sma_register(
                 self.registers['battery_power'],
@@ -477,41 +516,47 @@ class SmartEnergyController:
             if not self.sma_client or not self.sma_client.connected:
                 await self.connect_sma()
 
-            # Convert single value to register pair if needed
-            if isinstance(value, (int, float)):
-                value = [
-                    (int(value) >> 16) & 0xFFFF,  # High word
-                    int(value) & 0xFFFF           # Low word
-                ]
+            # SMA uses base-1 addressing
+            address = address - 1
 
-            # Try both address variants
-            for base_adjust in [0, -1]:
-                address_adj = address + base_adjust
+            # Write registers
+            if len(value) == 2:
+                result1 = self.sma_client.write_register(
+                    address=address,
+                    value=value[0],
+                    slave=self.sma_unit_id
+                )
+                result2 = self.sma_client.write_register(
+                    address=address + 1,
+                    value=value[1],
+                    slave=self.sma_unit_id
+                )
+                success = not (result1.isError() or result2.isError())
 
-                # Write registers
-                if len(value) == 2:
-                    result1 = self.sma_client.write_register(
-                        address=address_adj,
-                        value=value[0],
-                        slave=self.sma_unit_id
-                    )
-                    result2 = self.sma_client.write_register(
-                        address=address_adj + 1,
-                        value=value[1],
-                        slave=self.sma_unit_id
-                    )
-                    success = not (result1.isError() or result2.isError())
-                else:
-                    result = self.sma_client.write_register(
-                        address=address_adj,
-                        value=value[0],
-                        slave=self.sma_unit_id
-                    )
-                    success = not result.isError()
+                self.log_register_debug(
+                    f"Write results for register {address}:",
+                    [
+                        f"First write: {'Success' if not result1.isError() else 'Error'}",
+                        f"Second write: {'Success' if not result2.isError() else 'Error'}"
+                    ],
+                    DebugLevel.TRACE
+                )
+            else:
+                result = self.sma_client.write_register(
+                    address=address,
+                    value=value[0],
+                    slave=self.sma_unit_id
+                )
+                success = not result.isError()
+                self.log_register_debug(
+                    f"Write result for register {address}:",
+                    [f"Write: {'Success' if success else 'Error'}"],
+                    DebugLevel.TRACE
+                )
 
-                if success:
-                    logger.debug(f"Successfully wrote {value} to register {address}")
-                    return True
+            if success:
+                logger.debug(f"Successfully wrote {value} to register {address}")
+                return True
 
             logger.error(f"Failed to write to register {address}")
             return False
