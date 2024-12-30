@@ -5,19 +5,51 @@ import aiohttp
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, IntEnum
 from pathlib import Path
 from pymodbus.client import ModbusTcpClient
 from dotenv import load_dotenv
 import os
 from pymodbus.constants import Endian
+import argparse
+
+# Create logger
+logger = logging.getLogger(__name__)
 
 # Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+def setup_logging(debug_level: int):
+    """Configure logging based on debug level"""
+    # Base format for all levels
+    base_format = '%(asctime)s - %(levelname)s - %(message)s'
+
+    if debug_level >= DebugLevel.TRACE:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format=base_format + ' - [%(filename)s:%(lineno)d]'
+        )
+        # Enable pymodbus debug logging
+        logging.getLogger('pymodbus').setLevel(logging.DEBUG)
+    elif debug_level >= DebugLevel.DETAILED:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format=base_format
+        )
+    elif debug_level >= DebugLevel.BASIC:
+        logging.basicConfig(
+            level=logging.INFO,
+            format=base_format
+        )
+    else:
+        logging.basicConfig(
+            level=logging.WARNING,
+            format=base_format
+        )
+
+class DebugLevel(IntEnum):
+    NONE = 0    # Basic info only
+    BASIC = 1   # Basic debug info
+    DETAILED = 2  # Detailed debug info
+    TRACE = 3   # Full trace with register values
 
 class BatteryMode(Enum):
     NORMAL = 803      # Normal operation (0x323)
@@ -34,7 +66,8 @@ class BatteryStatus:
     temperature: float      # Battery temperature
 
 class SmartEnergyController:
-    def __init__(self):
+    def __init__(self, debug_level: int = DebugLevel.NONE):
+        self.debug_level = debug_level
         load_dotenv()
 
         # SMA Configuration
@@ -80,6 +113,20 @@ class SmartEnergyController:
             'battery_power': 40149,   # Battery power control register
         }
 
+    def log_register_debug(self, message: str, registers=None, level: int = DebugLevel.DETAILED):
+        """Log register information based on debug level"""
+        if self.debug_level >= level:
+            if registers is not None:
+                reg_hex = ' '.join([f'0x{r:04X}' for r in registers]) if registers else 'None'
+                reg_dec = ' '.join([f'{r}' for r in registers]) if registers else 'None'
+                reg_bin = ' '.join([f'{r:016b}' for r in registers]) if registers else 'None'
+                logger.debug(f"{message}\n"
+                           f"  HEX: {reg_hex}\n"
+                           f"  DEC: {reg_dec}\n"
+                           f"  BIN: {reg_bin}")
+            else:
+                logger.debug(message)
+
     async def connect_sma(self):
         """Connect to SMA inverter"""
         try:
@@ -90,17 +137,23 @@ class SmartEnergyController:
             return False
 
     async def read_sma_register(self, register_addr, count=2):
-        """Read register with proper error handling - matching sma_modbus.py"""
+        """Read register with enhanced debug logging"""
         try:
+            self.log_register_debug(
+                f"Reading register {register_addr} (count={count})",
+                level=DebugLevel.BASIC
+            )
+
             if not self.sma_client or not self.sma_client.connected:
                 await self.connect_sma()
 
-            logger.debug(f"Attempting to read register {register_addr} with count {count}")
-
-            # Try both address variants as in sma_modbus.py
+            # Try both address variants
             for base_adjust in [0, -1]:
                 address = register_addr + base_adjust
-                logger.debug(f"Trying address: {address}")
+                self.log_register_debug(
+                    f"Trying address variant: {address}",
+                    level=DebugLevel.DETAILED
+                )
 
                 result = self.sma_client.read_holding_registers(
                     address=address,
@@ -109,14 +162,24 @@ class SmartEnergyController:
                 )
 
                 if not result:
-                    logger.debug(f"No response from register {register_addr} at address {address}")
+                    self.log_register_debug(
+                        f"No response from register {register_addr} at address {address}",
+                        level=DebugLevel.DETAILED
+                    )
                     continue
 
                 if result.isError():
-                    logger.debug(f"Error reading register {register_addr} at address {address}: {result}")
+                    self.log_register_debug(
+                        f"Error reading register {register_addr} at address {address}: {result}",
+                        level=DebugLevel.DETAILED
+                    )
                     continue
 
-                logger.debug(f"Successfully read register {register_addr} at address {address}: {result.registers}")
+                self.log_register_debug(
+                    f"Successfully read register {register_addr} at address {address}:",
+                    result.registers,
+                    DebugLevel.TRACE
+                )
                 return result.registers
 
             logger.error(f"Failed to read register {register_addr} with all address variants")
@@ -403,8 +466,14 @@ class SmartEnergyController:
             return False
 
     async def write_sma_register(self, address: int, value: list) -> bool:
-        """Write register to SMA inverter"""
+        """Write register with enhanced debug logging"""
         try:
+            self.log_register_debug(
+                f"Writing to register {address}:",
+                value,
+                DebugLevel.BASIC
+            )
+
             if not self.sma_client or not self.sma_client.connected:
                 await self.connect_sma()
 
@@ -570,8 +639,17 @@ class SmartEnergyController:
 
             await asyncio.sleep(300)  # Run every 5 minutes
 
+def parse_args():
+    parser = argparse.ArgumentParser(description='Smart Energy Controller')
+    parser.add_argument('--debug', type=int, choices=[0, 1, 2, 3],
+                       default=int(os.getenv('DEBUG_LEVEL', '0')),
+                       help='Debug level (0=None, 1=Basic, 2=Detailed, 3=Trace)')
+    return parser.parse_args()
+
 async def main():
-    controller = SmartEnergyController()
+    args = parse_args()
+    setup_logging(args.debug)
+    controller = SmartEnergyController(debug_level=args.debug)
     await controller.run()
 
 if __name__ == "__main__":
