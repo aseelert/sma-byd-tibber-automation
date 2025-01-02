@@ -25,6 +25,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+STP60_SHP75_STPS60-SunSpec_Modbus-TI-de-15.pdf
 
 # Environment variables
 .env

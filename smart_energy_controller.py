@@ -64,6 +64,9 @@ class BatteryStatus:
     target_power: int       # Target charging power (W)
     is_charging: bool       # True if currently charging
     temperature: float      # Battery temperature
+    grid_power: int        # Grid power exchange
+    pv_power: int          # House consumption
+    solar_power: int       # Solar generation
 
 class SmartEnergyController:
     def __init__(self, debug_level: int = DebugLevel.NONE):
@@ -103,14 +106,16 @@ class SmartEnergyController:
         self.log_dir = Path('logs')
         self.log_dir.mkdir(exist_ok=True)
 
-        # Updated register addresses from sma_modbus.py
+        # Updated register addresses to match working configuration
         self.registers = {
             'grid_power': 30865,      # Grid power exchange
             'pv_power': 30775,        # Current power consumption
             'solar_power': 30773,     # Current solar generation power
-            'battery_soc': 30845,      # Battery State of Charge in %
+            'battery_soc': 30845,     # Battery State of Charge in %
+
+            # Holding Registers (40xxx) for control
             'battery_mode': 40151,    # Battery operation mode register
-            'battery_power': 40149,   # Battery power control register
+            'battery_power': 40149    # Battery power control register
         }
 
     def log_register_debug(self, message: str, registers=None, level: int = DebugLevel.DETAILED):
@@ -137,88 +142,80 @@ class SmartEnergyController:
             return False
 
     async def read_sma_register(self, register_addr, count=2):
-        """Read register with enhanced debug logging"""
+        """Read register with proper error handling"""
         try:
-            self.log_register_debug(
-                f"Reading register {register_addr} (count={count})",
-                level=DebugLevel.BASIC
-            )
-
             if not self.sma_client or not self.sma_client.connected:
                 await self.connect_sma()
 
-            # Try both address variants as in sma_modbus.py
+            logger.debug(f"Attempting to read register {register_addr} with count {count}")
+
+            # Try both base-0 and base-1 addressing
             for base_adjust in [0, -1]:
                 address = register_addr + base_adjust
-                self.log_register_debug(
-                    f"Trying address variant: {address}",
-                    level=DebugLevel.DETAILED
+                logger.debug(f"Trying address: {address}")
+
+                result = self.sma_client.read_holding_registers(
+                    address=address,
+                    count=count,
+                    slave=self.sma_unit_id
                 )
 
-                try:
-                    result = self.sma_client.read_holding_registers(
-                        address=address,
-                        count=count,
-                        slave=self.sma_unit_id
-                    )
-
-                    if result and not result.isError():
-                        self.log_register_debug(
-                            f"Successfully read register {register_addr} at address {address}:",
-                            result.registers,
-                            DebugLevel.TRACE
-                        )
-                        return result.registers
-
-                    self.log_register_debug(
-                        f"Failed attempt at address {address}: {result if result else 'No response'}",
-                        level=DebugLevel.DETAILED
-                    )
-
-                except Exception as e:
-                    self.log_register_debug(
-                        f"Error trying address {address}: {e}",
-                        level=DebugLevel.DETAILED
-                    )
+                if not result:
+                    logger.debug(f"No response from register {register_addr} at address {address}")
                     continue
+
+                if result.isError():
+                    logger.debug(f"Error reading register {register_addr} at address {address}: {result}")
+                    continue
+
+                logger.debug(f"Successfully read register {register_addr} at address {address}: {result.registers}")
+                return result.registers
 
             logger.error(f"Failed to read register {register_addr} with all address variants")
             return None
 
         except Exception as e:
-            logger.error(f"Error reading register {register_addr}: {e}")
+            logger.error(f"Error reading register {register_addr}: {e}", exc_info=True)
             return None
 
     def decode_s32(self, registers):
-        """Decode signed 32-bit integer"""
+        """Decode signed 32-bit integer from two registers"""
         try:
-            if not registers or len(registers) < 2:
+            if not registers or len(registers) != 2:
                 return 0
 
-            # Combine two 16-bit registers into one 32-bit value
-            value = (registers[0] << 16) | registers[1]
+            # Create a temporary client if none exists
+            client = self.sma_client or ModbusTcpClient(self.sma_host)
 
-            # Handle signed values
-            if value & 0x80000000:  # If highest bit is set (negative)
-                value = -((~value & 0xFFFFFFFF) + 1)
-
-            return value
+            # Use the client's built-in conversion method with updated Endian constant
+            return client.convert_from_registers(
+                registers,
+                client.DATATYPE.INT32,
+                word_order=Endian.BIG
+            )
 
         except Exception as e:
-            logger.error(f"Error decoding signed 32-bit value: {e}")
+            logger.error(f"Error decoding s32 value: {e}")
             return 0
 
     def decode_u32(self, registers):
-        """Decode unsigned 32-bit integer"""
+        """Decode unsigned 32-bit integer from two registers"""
         try:
-            if not registers or len(registers) < 2:
+            if not registers or len(registers) != 2:
                 return 0
 
-            # Combine two 16-bit registers into one 32-bit value
-            return (registers[0] << 16) | registers[1]
+            # Create a temporary client if none exists
+            client = self.sma_client or ModbusTcpClient(self.sma_host)
+
+            # Use the client's built-in conversion method with updated Endian constant
+            return client.convert_from_registers(
+                registers,
+                client.DATATYPE.UINT32,
+                word_order=Endian.BIG
+            )
 
         except Exception as e:
-            logger.error(f"Error decoding unsigned 32-bit value: {e}")
+            logger.error(f"Error decoding u32 value: {e}")
             return 0
 
     async def get_car_charging_status(self) -> bool:
@@ -292,56 +289,54 @@ class SmartEnergyController:
             return []
 
     async def get_battery_status(self) -> BatteryStatus:
-        """Get current battery status using sma_modbus.py approach"""
+        """Get current battery status"""
         try:
-            # Read battery SoC (unsigned 32-bit)
+            # Read battery SoC
             soc_registers = await self.read_sma_register(self.registers['battery_soc'])
-            soc = self.decode_u32(soc_registers) if soc_registers else 0
+            soc = 0
+            if soc_registers and len(soc_registers) == 2:
+                soc = soc_registers[1]  # Use the second value directly
+                logger.debug(f"Raw SoC registers: {soc_registers}, using value: {soc}")
 
-            if self.debug_level >= DebugLevel.DETAILED:
-                logger.debug(f"Raw SoC registers: {soc_registers}")
-                logger.debug(f"Decoded SoC: {soc}%")
+            # Read grid power
+            grid_registers = await self.read_sma_register(self.registers['grid_power'])
+            grid_power = 0
+            if grid_registers and len(grid_registers) == 2:
+                grid_power = self.decode_s32(grid_registers)
 
-            # Read grid power (signed 32-bit)
-            power_registers = await self.read_sma_register(self.registers['grid_power'])
-            power = self.decode_s32(power_registers) if power_registers else 0
+            # Read house consumption
+            pv_registers = await self.read_sma_register(self.registers['pv_power'])
+            pv_power = 0
+            if pv_registers and len(pv_registers) == 2:
+                pv_power = self.decode_s32(pv_registers)
 
-            if self.debug_level >= DebugLevel.DETAILED:
-                logger.debug(f"Raw power registers: {power_registers}")
-                logger.debug(f"Decoded power: {power}W")
+            # Read solar generation
+            solar_registers = await self.read_sma_register(self.registers['solar_power'])
+            solar_power = 0
+            if solar_registers and len(solar_registers) == 2:
+                solar_power = self.decode_s32(solar_registers)
 
-            # Read mode register (single register)
+            # Read mode register
             mode_registers = await self.read_sma_register(self.registers['battery_mode'], count=1)
-            mode_value = mode_registers[0] if mode_registers else BatteryMode.NORMAL.value
+            mode = BatteryMode.NORMAL
+            if mode_registers and mode_registers[0] != 65535:
+                mode_value = mode_registers[0]
+                mode = BatteryMode(mode_value) if mode_value in [m.value for m in BatteryMode] else BatteryMode.NORMAL
 
-            if self.debug_level >= DebugLevel.DETAILED:
-                logger.debug(f"Raw mode register: {mode_registers}")
-                logger.debug(f"Mode value: {mode_value}")
-
-            # Map mode value to BatteryMode
-            try:
-                mode = BatteryMode(mode_value)
-            except ValueError:
-                logger.warning(f"Invalid mode value {mode_value}, defaulting to NORMAL")
-                mode = BatteryMode.NORMAL
-
-            status = BatteryStatus(
+            return BatteryStatus(
                 soc=soc,
-                power=power,
+                power=grid_power,
                 mode=mode,
-                target_power=self.charge_power,
-                is_charging=power > 0 if power is not None else False,
-                temperature=0  # Temperature not available
+                target_power=0,
+                is_charging=grid_power > 0,
+                temperature=0,
+                grid_power=grid_power,
+                pv_power=pv_power,
+                solar_power=solar_power
             )
-
-            if self.debug_level >= DebugLevel.BASIC:
-                logger.info(f"Battery Status: SoC={status.soc}%, Power={status.power}W, Mode={status.mode.name}")
-
-            return status
 
         except Exception as e:
             logger.error(f"Error getting battery status: {e}")
-            logger.exception("Detailed error trace:") if self.debug_level >= DebugLevel.DETAILED else None
             return None
 
     def find_best_charging_window(self, prices: List[Dict], hours_needed: int = 4) -> Dict:
@@ -582,7 +577,9 @@ class SmartEnergyController:
             # Log current system state
             logger.info("\nCurrent System Status:")
             logger.info(f"Battery SoC: {battery.soc}%")
-            logger.info(f"Battery Power: {battery.power}W")
+            logger.info(f"Grid Power Exchange: {battery.grid_power}")
+            logger.info(f"House Consumption: {battery.pv_power}")
+            logger.info(f"Solar Generation: {battery.solar_power}")
             logger.info(f"Battery Mode: {battery.mode.name}")
             logger.info(f"Car Charging: {car_charging}")
 
