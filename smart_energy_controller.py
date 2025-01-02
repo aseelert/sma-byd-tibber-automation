@@ -52,9 +52,25 @@ class DebugLevel(IntEnum):
     TRACE = 3   # Full trace with register values
 
 class BatteryMode(Enum):
-    NORMAL = 803      # Normal operation (0x323)
-    PAUSE = 802       # Pause charging/discharging (0x322)
-    GRID_CHARGE = 802 # Grid charge uses same mode as pause, but with power setting
+    NORMAL = 803           # Normal operation (0x323) - value [0, 803]
+    PAUSE = 802            # Pause charging/discharging (0x322) - value [0, 802]
+    GRID_CHARGE = 802      # Grid charge uses same mode as pause, but with power setting
+    AUTO = 65533          # Automatic mode - value [255, 65533]
+
+    @staticmethod
+    def is_auto_mode(registers):
+        """Check if the registers indicate AUTO mode"""
+        return registers == [255, 65533]
+
+    @staticmethod
+    def from_registers(registers):
+        """Convert register values to BatteryMode"""
+        if BatteryMode.is_auto_mode(registers):
+            return BatteryMode.AUTO
+        elif len(registers) == 2:
+            mode_value = registers[1]
+            return next((mode for mode in BatteryMode if mode.value == mode_value), BatteryMode.NORMAL)
+        return BatteryMode.NORMAL
 
 @dataclass
 class BatteryStatus:
@@ -152,30 +168,26 @@ class SmartEnergyController:
             # Try both base-0 and base-1 addressing
             for base_adjust in [0, -1]:
                 address = register_addr + base_adjust
-                logger.debug(f"Trying address: {address}")
+                try:
+                    result = self.sma_client.read_holding_registers(
+                        address=address,
+                        count=count,
+                        slave=self.sma_unit_id
+                    )
 
-                result = self.sma_client.read_holding_registers(
-                    address=address,
-                    count=count,
-                    slave=self.sma_unit_id
-                )
+                    if result and not result.isError():
+                        logger.debug(f"Successfully read register {register_addr} at address {address}: {result.registers}")
+                        return result.registers
 
-                if not result:
-                    logger.debug(f"No response from register {register_addr} at address {address}")
+                except Exception as e:
+                    logger.debug(f"Failed to read from address {address}: {e}")
                     continue
 
-                if result.isError():
-                    logger.debug(f"Error reading register {register_addr} at address {address}: {result}")
-                    continue
-
-                logger.debug(f"Successfully read register {register_addr} at address {address}: {result.registers}")
-                return result.registers
-
-            logger.error(f"Failed to read register {register_addr} with all address variants")
+            logger.error(f"Failed to read register {register_addr}")
             return None
 
         except Exception as e:
-            logger.error(f"Error reading register {register_addr}: {e}", exc_info=True)
+            logger.error(f"Error reading register {register_addr}: {e}")
             return None
 
     def decode_s32(self, registers):
@@ -295,7 +307,7 @@ class SmartEnergyController:
             soc_registers = await self.read_sma_register(self.registers['battery_soc'])
             soc = 0
             if soc_registers and len(soc_registers) == 2:
-                soc = soc_registers[1]  # Use the second value directly
+                soc = soc_registers[1]
                 logger.debug(f"Raw SoC registers: {soc_registers}, using value: {soc}")
 
             # Read grid power
@@ -317,11 +329,16 @@ class SmartEnergyController:
                 solar_power = self.decode_s32(solar_registers)
 
             # Read mode register
-            mode_registers = await self.read_sma_register(self.registers['battery_mode'], count=1)
+            mode_registers = await self.read_sma_register(self.registers['battery_mode'], count=2)
             mode = BatteryMode.NORMAL
-            if mode_registers and mode_registers[0] != 65535:
-                mode_value = mode_registers[0]
-                mode = BatteryMode(mode_value) if mode_value in [m.value for m in BatteryMode] else BatteryMode.NORMAL
+            if mode_registers and len(mode_registers) == 2:
+                if mode_registers == [255, 65533]:  # Check for automatic mode
+                    mode = BatteryMode.AUTO
+                    logger.debug("Battery in automatic mode")
+                else:
+                    mode_value = mode_registers[1]  # Use second register value
+                    mode = BatteryMode(mode_value) if mode_value in [m.value for m in BatteryMode] else BatteryMode.NORMAL
+                logger.debug(f"Raw mode registers: {mode_registers}, using mode: {mode.name}")
 
             return BatteryStatus(
                 soc=soc,
@@ -440,63 +457,109 @@ class SmartEnergyController:
             logger.exception("Detailed error trace:")
             return None
 
-    async def set_battery_mode(self, mode: BatteryMode, power: int = 0):
-        """Set battery mode and power with correct register values"""
+    async def set_battery_mode(self, mode: BatteryMode, power: int = 0) -> bool:
+        """Set battery operation mode"""
         try:
-            self.log_register_debug(
-                "Setting battery mode:",
-                [0, mode.value],
-                DebugLevel.DETAILED
-            )
+            # First check current mode
+            current_mode = await self.read_sma_register(self.registers['battery_mode'], count=2)
+            logger.debug(f"Current mode registers: {current_mode}")
 
-            # First set the mode register (40151) with exact values [0, 802/803]
-            mode_result = await self.write_sma_register(
-                self.registers['battery_mode'],
-                [0, mode.value]  # Exactly as in HA: [0, 802] for charging/pause, [0, 803] for normal
-            )
-
-            if not mode_result:
-                logger.error(f"Failed to set battery mode to {mode.name}")
+            # If currently in AUTO mode and trying to set a different mode
+            if current_mode == [255, 65533] and mode != BatteryMode.AUTO:
+                logger.warning("Battery is in AUTO mode. Must disable AUTO mode first before setting other modes.")
                 return False
 
-            await asyncio.sleep(5)  # 5-second delay as in YAML
+            logger.info(f"Setting battery mode to {mode.name}" + (f" with power {power}W" if power else ""))
 
-            # Then set the power register (40149)
-            if mode == BatteryMode.GRID_CHARGE:
-                # For charging: [65535, (65535 - power)] exactly as in HA
-                power_value = [65535, 65535 - power]
-                self.log_register_debug(
-                    f"Setting charge power to {power}W:",
-                    power_value,
-                    DebugLevel.DETAILED
-                )
-            elif mode == BatteryMode.PAUSE:
-                # For pause: [0, 0] exactly as in HA
-                power_value = [0, 0]
-                self.log_register_debug(
-                    "Setting power to pause mode:",
-                    power_value,
-                    DebugLevel.DETAILED
-                )
+            # Rest of your existing code...
+            if mode == BatteryMode.AUTO:
+                mode_high = 255
+                mode_low = 65533
             else:
-                # Normal mode doesn't need power setting
-                logger.debug("Normal mode - no power setting needed")
-                return True
+                mode_high = 0
+                mode_low = mode.value
 
-            power_result = await self.write_sma_register(
-                self.registers['battery_power'],
-                power_value
+            logger.debug(f"Writing to register {self.registers['battery_mode']}: high=[{mode_high}], low=[{mode_low}]")
+            logger.debug(f"Using slave ID: {self.sma_unit_id}")
+
+            # Verify connection before writing
+            if not self.sma_client or not self.sma_client.connected:
+                logger.debug("Client not connected, attempting to reconnect...")
+                await self.connect_sma()
+                if not self.sma_client.connected:
+                    logger.error("Failed to reconnect to SMA inverter")
+                    return False
+
+            # Write mode to register with correct format
+            mode_result1 = self.sma_client.write_register(
+                address=self.registers['battery_mode'],
+                value=mode_high,
+                slave=self.sma_unit_id
             )
 
-            if not power_result:
-                logger.error(f"Failed to set battery power to {power}W")
+            logger.debug(f"First write result: {mode_result1}")
+            if mode_result1.isError():
+                logger.error(f"First write failed with error: {mode_result1}")
+
+            # Add small delay between writes
+            await asyncio.sleep(0.1)
+
+            mode_result2 = self.sma_client.write_register(
+                address=self.registers['battery_mode'] + 1,
+                value=mode_low,
+                slave=self.sma_unit_id
+            )
+
+            logger.debug(f"Second write result: {mode_result2}")
+            if mode_result2.isError():
+                logger.error(f"Second write failed with error: {mode_result2}")
+
+            if mode_result1.isError() or mode_result2.isError():
+                logger.error(f"Failed to set mode to {mode.name}")
+                # Try to read current mode for debugging
+                current_mode = await self.read_sma_register(self.registers['battery_mode'], count=2)
+                logger.debug(f"Current mode registers: {current_mode}")
                 return False
 
-            logger.info(f"Successfully set battery to {mode.name} mode with power {power}W")
+            # Only set power if not in AUTO mode
+            if power != 0 and mode != BatteryMode.AUTO:
+                if power > 0:  # Charging
+                    power_high = 65535
+                    power_low = 65535 - power
+                else:  # Discharging
+                    power_high = 0
+                    power_low = abs(power)
+
+                logger.debug(f"Setting power registers: High={power_high}, Low={power_low}")
+                logger.debug(f"Writing to register {self.registers['battery_power']}")
+
+                power_result1 = self.sma_client.write_register(
+                    address=self.registers['battery_power'],
+                    value=power_high,
+                    slave=self.sma_unit_id
+                )
+
+                logger.debug(f"Power write result 1: {power_result1}")
+
+                await asyncio.sleep(0.1)
+
+                power_result2 = self.sma_client.write_register(
+                    address=self.registers['battery_power'] + 1,
+                    value=power_low,
+                    slave=self.sma_unit_id
+                )
+
+                logger.debug(f"Power write result 2: {power_result2}")
+
+                if power_result1.isError() or power_result2.isError():
+                    logger.error(f"Failed to set power to {power}W")
+                    return False
+
+            logger.info(f"Successfully set battery mode to {mode.name}")
             return True
 
         except Exception as e:
-            logger.error(f"Error setting battery mode: {e}")
+            logger.error(f"Error setting battery mode: {e}", exc_info=True)
             return False
 
     async def write_sma_register(self, address: int, value: list) -> bool:
