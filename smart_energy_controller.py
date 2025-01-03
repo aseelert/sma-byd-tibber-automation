@@ -684,6 +684,12 @@ class SmartEnergyController:
             logger.info(f"Battery Mode: {battery_status.operation_mode.name}")
             logger.info(f"Car Charging: {car_charging_active}")
 
+            # Check if car is charging - if so, set battery to pause
+            if car_charging_active:
+                logger.info("Car is charging - setting battery to PAUSE mode")
+                await self.set_battery_mode(BatteryMode.PAUSE)
+                return
+
             # Get current price and check if it's favorable
             now = datetime.now().astimezone()
             current_price_data = next(
@@ -700,13 +706,11 @@ class SmartEnergyController:
                 max_price = max(price_values)
                 price_range = max_price - min_price
 
-                # Calculate how favorable current price is
                 current_price_position = (current_price - min_price) / price_range if price_range > 0 else 0
-                is_current_price_favorable = current_price_position <= 0.2  # Within best 20% of prices
+                is_current_price_favorable = current_price_position <= 0.2
 
                 logger.info(f"Current price position: {current_price_position*100:.1f}% above minimum")
 
-                # Check if we should charge now
                 should_charge_now = (
                     is_current_price_favorable and
                     battery_status.state_of_charge < self.optimal_charge_level and
@@ -714,15 +718,30 @@ class SmartEnergyController:
                 )
 
                 if should_charge_now:
-                    # Calculate optimal charging power based on price position and SoC
+                    # Calculate base charging power based on SoC
                     base_power = min(5000, max(1500, int(5000 * (1 - battery_status.state_of_charge/100))))
-                    # Adjust power based on how good the price is
-                    power_factor = 1 - current_price_position  # Higher power for better prices
-                    charging_power = int(base_power * (0.7 + 0.3 * power_factor))  # 70-100% of base power
+
+                    # Reduce power as we approach max SoC
+                    soc_factor = 1.0
+                    if battery_status.state_of_charge >= 85:
+                        # Gradually reduce power from 100% to 20% between 85% and 95% SoC
+                        soc_factor = 1.0 - (0.8 * (battery_status.state_of_charge - 85) / 10)
+                        logger.info(f"Reducing charging power due to high SoC ({battery_status.state_of_charge}%), "
+                                  f"factor: {soc_factor:.2f}")
+
+                    # Adjust power based on price position
+                    price_factor = 1 - current_price_position
+
+                    # Calculate final charging power
+                    charging_power = int(base_power * soc_factor * (0.7 + 0.3 * price_factor))
+
+                    # Ensure minimum power threshold of 1000W
+                    charging_power = max(1000, charging_power)
 
                     logger.info(
-                        f"Starting to charge at {charging_power}W due to favorable current price "
-                        f"({current_price_position*100:.0f}% above minimum)"
+                        f"Starting to charge at {charging_power}W "
+                        f"(base: {base_power}W, SoC factor: {soc_factor:.2f}, "
+                        f"price factor: {price_factor:.2f})"
                     )
                     await self.set_battery_mode(BatteryMode.FAST_CHARGE, charging_power)
                     return
