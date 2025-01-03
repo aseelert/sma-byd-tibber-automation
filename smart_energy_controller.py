@@ -368,12 +368,66 @@ def parse_args():
                        help='Force battery mode (charge/discharge/pause/normal)')
     parser.add_argument('--power', type=int, default=2000,
                        help='Power in watts for charging/discharging (default: 2000)')
+    parser.add_argument('--check-registers', action='store_true',
+                       help='Check and display all register values')
     return parser.parse_args()
+
+async def check_registers(controller: SmartEnergyController, debug_level: int):
+    """Read and display all register values"""
+    logger.info("\n" + "="*50)
+    logger.info("Checking all registers...")
+    logger.info("="*50)
+
+    async with controller as c:
+        # Group registers by category
+        categories = {}
+        for name, reg in c.sma.registers.items():
+            category = name.split('_')[0].title()
+            if category not in categories:
+                categories[category] = []
+            categories[category].append((name, reg))
+
+        # Read and display registers by category
+        for category, registers in sorted(categories.items()):
+            logger.info(f"\n{category} Registers:")
+            logger.info("-" * 80)
+
+            if debug_level >= DebugLevel.DETAILED:
+                header = f"{'Register Name':<25} {'Value':<15} {'Unit':<8} {'Address':<8} {'Type':<6} {'Format':<6}"
+                logger.info(header)
+                logger.info("-" * 80)
+
+            for name, reg in sorted(registers):
+                try:
+                    value = await c.sma.read_register_value(name)
+
+                    if debug_level >= DebugLevel.DETAILED:
+                        # Detailed output
+                        reg_info = f"{name:<25} {str(value):<15} {reg.unit or '-':<8} "
+                        reg_info += f"{reg.address:<8} {reg.type.name:<6} {reg.format.name:<6}"
+                        logger.info(reg_info)
+
+                        if debug_level >= DebugLevel.TRACE:
+                            raw_values = await c.sma.read_registers(reg.address, reg.count)
+                            logger.debug(f"  Raw values: {raw_values}")
+                    else:
+                        # Basic output with register address
+                        unit_str = f" {reg.unit}" if reg.unit else ""
+                        logger.info(f"{name:<25} ({reg.address:>5}): {value}{unit_str}")
+
+                except Exception as e:
+                    logger.error(f"Error reading {name}: {e}")
+
+        logger.info("\n" + "="*50)
 
 async def main():
     args = parse_args()
     setup_logging(args.debug)
     controller = SmartEnergyController(debug_level=args.debug)
+
+    if args.check_registers:
+        await check_registers(controller, args.debug)
+        return
 
     if args.battery:
         logger.info(f"Setting battery mode to: {args.battery}")
