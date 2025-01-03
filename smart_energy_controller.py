@@ -148,9 +148,9 @@ class SmartEnergyController:
         self.max_charging_power = 2500 # Default charging power (W)
 
         # Price thresholds in €/kWh
-        self.price_threshold_very_low = 0.10
-        self.price_threshold_low = 0.15
-        self.price_threshold_normal = 0.20
+        self.price_threshold_very_low = 0.16
+        self.price_threshold_low = 0.20
+        self.price_threshold_normal = 0.25
 
         # Register mapping for Modbus communication
         self.registers = {
