@@ -239,14 +239,14 @@ class SMAClient:
     async def get_battery_status(self) -> Optional[BatteryStatus]:
         """Get current battery system status"""
         try:
-            # Read raw register values
+            # Read raw register values using new register names
             soc_registers = await self.read_registers(self.registers['battery_soc'].address)
-            grid_registers = await self.read_registers(self.registers['grid_power'].address)
+            grid_registers = await self.read_registers(self.registers['total_ac_power'].address)  # Changed from grid_power
             house_registers = await self.read_registers(self.registers['house_consumption'].address)
             battery_registers = await self.read_registers(self.registers['battery_power'].address)
-            pv_registers = await self.read_registers(self.registers['dc_power_a'].address)
+            pv_registers = await self.read_registers(self.registers['total_dc_power'].address)    # Changed from dc_power_a
             mode_registers = await self.read_registers(self.registers['battery_control_mode'].address)
-            battery_status_registers = await self.read_registers(self.registers['battery_status'].address)
+            battery_status_registers = await self.read_registers(self.registers['battery_charging_status'].address)
 
             # Debug logging for raw values
             if logger.getEffectiveLevel() <= logging.DEBUG:
@@ -270,11 +270,8 @@ class SMAClient:
                 battery_status = BATTERY_STATUS[battery_status_value]
                 logger.debug(f"Battery Status: {battery_status}")
 
-            # Sum both MPP tracker powers for total PV power
-            pv_power_a = self.decode_s32(pv_registers) if pv_registers else 0
-            pv_power_b_registers = await self.read_registers(self.registers['dc_power_b'].address)
-            pv_power_b = self.decode_s32(pv_power_b_registers) if pv_power_b_registers else 0
-            pv_power = pv_power_a + pv_power_b
+            # Get PV power (now using total DC power)
+            pv_power = self.decode_s32(pv_registers) if pv_registers else 0
 
             # Get current operation mode
             current_mode = BatteryMode.from_registers(mode_registers) if mode_registers else BatteryMode.NORMAL
@@ -285,7 +282,7 @@ class SMAClient:
                 logger.debug(f"Decoded grid power: {grid_power}W")
                 logger.debug(f"Decoded house power: {house_power}W")
                 logger.debug(f"Decoded battery power: {battery_power}W")
-                logger.debug(f"Decoded PV power: {pv_power}W (A: {pv_power_a}W, B: {pv_power_b}W)")
+                logger.debug(f"Decoded PV power: {pv_power}W")
                 logger.debug(f"Battery operating status: {battery_status}")
 
             return BatteryStatus(

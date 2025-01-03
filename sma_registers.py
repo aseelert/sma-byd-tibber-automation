@@ -40,6 +40,7 @@ SMA_REGISTERS = {
     # Current Power Values
     "total_dc_power":          ModbusRegister(30773, 2, RegisterType.S32, RegisterFormat.FIX0, "DC power input (sum of both MPP)", "W"),
     "total_ac_power":          ModbusRegister(30775, 2, RegisterType.S32, RegisterFormat.FIX0, "AC power output (sum of all phases)", "W"),
+    "house_consumption":        ModbusRegister(30865, 2, RegisterType.S32, RegisterFormat.FIX0, "Current house consumption", "W"),
     "total_ac_apparent":       ModbusRegister(30813, 2, RegisterType.S32, RegisterFormat.FIX0, "AC apparent power (sum of all phases)", "VA"),
     "total_ac_reactive":       ModbusRegister(30805, 2, RegisterType.S32, RegisterFormat.FIX0, "AC reactive power (sum of all phases)", "var"),
 
@@ -76,6 +77,8 @@ SMA_REGISTERS = {
     "battery_charging_status": ModbusRegister(30955, 2, RegisterType.U32, RegisterFormat.ENUM, "Battery charging status", ""),
     "battery_operating_status":ModbusRegister(30957, 2, RegisterType.U32, RegisterFormat.ENUM, "Battery operating mode", ""),
     "battery_power":           ModbusRegister(30847, 2, RegisterType.S32, RegisterFormat.FIX0, "Current battery charging power", "W"),
+    "battery_control_mode":    ModbusRegister(40151, 2, RegisterType.U32, RegisterFormat.ENUM, "Battery operation mode control", ""),
+    "battery_power_control":   ModbusRegister(40149, 2, RegisterType.S32, RegisterFormat.FIX0, "Battery power setpoint", "W"),
 
     # Device Information
     "device_class":            ModbusRegister(30051, 2, RegisterType.U32, RegisterFormat.ENUM, "Device class", ""),
