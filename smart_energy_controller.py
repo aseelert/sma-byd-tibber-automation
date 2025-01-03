@@ -56,7 +56,6 @@ class BatteryMode(Enum):
     PAUSE = 802            # Pause charging/discharging (0x322) - value [0, 802]
     FAST_CHARGE = 802      # Fast charging mode (same as pause but with positive power)
     FAST_DISCHARGE = 802   # Fast discharging mode (same as pause but with negative power)
-    AUTO = 65533          # Automatic mode - value [255, 65533]
 
     @staticmethod
     def is_auto_mode(registers):
@@ -66,9 +65,11 @@ class BatteryMode(Enum):
     @staticmethod
     def from_registers(registers, power_registers=None):
         """Convert register values to BatteryMode with power context"""
-        if BatteryMode.is_auto_mode(registers):
-            return BatteryMode.AUTO
-        elif len(registers) == 2:
+        if len(registers) == 2:
+            # [255, 65533] is also NORMAL mode
+            if registers == [255, 65533]:
+                return BatteryMode.NORMAL
+
             mode_value = registers[1]
             if mode_value == 802:  # Need to determine specific mode based on power
                 if power_registers and len(power_registers) == 2:
@@ -93,6 +94,34 @@ class BatteryMode(Enum):
             return "FAST_DISCHARGE"
         return mode.name
 
+class BatteryChargingMode(Enum):
+    FAST_CHARGING = 1767      # Schnelladung
+    FULL_CHARGING = 1768      # Volladung
+    BALANCE_CHARGING = 1769   # Ausgleichsladung
+    MAINTENANCE = 1770        # Erhaltungsladung
+    ENERGY_SAVING = 2184      # Energiesparen am Netz
+
+    @staticmethod
+    def from_value(value: int) -> 'BatteryChargingMode':
+        """Convert register value to BatteryChargingMode"""
+        try:
+            return next(mode for mode in BatteryChargingMode if mode.value == value)
+        except StopIteration:
+            logger.warning(f"Unknown battery charging mode value: {value}")
+            return None
+
+    @property
+    def description(self) -> str:
+        """Get human-readable description of the mode"""
+        descriptions = {
+            BatteryChargingMode.FAST_CHARGING: "Fast Charging",
+            BatteryChargingMode.FULL_CHARGING: "Full Charging",
+            BatteryChargingMode.BALANCE_CHARGING: "Balance Charging",
+            BatteryChargingMode.MAINTENANCE: "Maintenance Charging",
+            BatteryChargingMode.ENERGY_SAVING: "Energy Saving"
+        }
+        return descriptions.get(self, "Unknown")
+
 @dataclass
 class BatteryStatus:
     soc: float              # State of charge (%)
@@ -104,6 +133,7 @@ class BatteryStatus:
     grid_power: int        # Grid power exchange
     pv_power: int          # House consumption
     solar_power: int       # Solar generation
+    charging_mode: BatteryChargingMode = None  # Active battery charging procedure
 
 class SmartEnergyController:
     def __init__(self, debug_level: int = DebugLevel.NONE):
@@ -146,9 +176,12 @@ class SmartEnergyController:
         # Updated register addresses to match working configuration
         self.registers = {
             'grid_power': 30865,      # Grid power exchange
-            'pv_power': 30775,        # Current power consumption
-            'solar_power': 30773,     # Current solar generation power
+            'pv_power': 30773,        # Current power consumption
+            'solar_power': 30775,     # Current solar generation power
             'battery_soc': 30845,     # Battery State of Charge in %
+            'battery_charging': 31397, # Battery charging status monitor
+            'battery_discharging': 31401, # Battery discharging status monitor
+            'battery_charge_mode': 30853,  # Active battery charging procedure
 
             # Holding Registers (40xxx) for control
             'battery_mode': 40151,    # Battery operation mode register
@@ -182,29 +215,45 @@ class SmartEnergyController:
         """Read register with proper error handling"""
         try:
             if not self.sma_client or not self.sma_client.connected:
-                await self.connect_sma()
+                if not await self.connect_sma():
+                    logger.error("Failed to connect to SMA client")
+                    return None
 
             logger.debug(f"Attempting to read register {register_addr} with count {count}")
 
-            # Try both base-0 and base-1 addressing
-            for base_adjust in [0, -1]:
-                address = register_addr + base_adjust
-                try:
+            # Calculate base address based on register range
+            if register_addr < 40000:
+                # Standard range - can use either type, but prefer input
+                base_address = register_addr
+                use_input = True
+            else:
+                # Holding registers (40xxx)
+                base_address = register_addr
+                use_input = False
+
+            try:
+                if use_input:
+                    result = self.sma_client.read_input_registers(
+                        address=base_address,
+                        count=count,
+                        slave=self.sma_unit_id
+                    )
+                else:
                     result = self.sma_client.read_holding_registers(
-                        address=address,
+                        address=base_address,
                         count=count,
                         slave=self.sma_unit_id
                     )
 
-                    if result and not result.isError():
-                        logger.debug(f"Successfully read register {register_addr} at address {address}: {result.registers}")
-                        return result.registers
+                if result and not result.isError():
+                    logger.debug(f"Successfully read register {register_addr} at address {base_address}: {result.registers}")
+                    return result.registers
+                else:
+                    logger.error(f"Error reading register {register_addr}: {result}")
 
-                except Exception as e:
-                    logger.debug(f"Failed to read from address {address}: {e}")
-                    continue
+            except Exception as e:
+                logger.error(f"Exception occurred while reading register {register_addr}: {e}")
 
-            logger.error(f"Failed to read register {register_addr}")
             return None
 
         except Exception as e:
@@ -250,6 +299,30 @@ class SmartEnergyController:
         except Exception as e:
             logger.error(f"Error decoding u32 value: {e}")
             return 0
+
+    def decode_u32_enum(self, registers):
+        """Decode unsigned 32-bit ENUM value from two registers"""
+        try:
+            # Create a temporary client if none exists
+            client = self.sma_client or ModbusTcpClient(self.sma_host)
+
+            # Use the client's built-in conversion method with updated Endian constant
+            value = client.convert_from_registers(
+                registers,
+                client.DATATYPE.UINT32,
+                word_order=Endian.BIG
+            )
+
+            # For U32 ENUM types, the value is in the second register
+            # 40151 register values:
+            # 802 = Active (PAUSE/FAST_CHARGE/FAST_DISCHARGE)
+            # 803 = Inactive (NORMAL)
+            logger.debug(f"U32 ENUM raw registers: {registers}, decoded value: {value}")
+            return value
+
+        except Exception as e:
+            logger.error(f"Error decoding U32 ENUM value: {e}")
+            return None
 
     async def get_car_charging_status(self) -> bool:
         """Get GO-E charger status"""
@@ -326,59 +399,103 @@ class SmartEnergyController:
         try:
             # Read battery SoC
             soc_registers = await self.read_sma_register(self.registers['battery_soc'])
-            soc = 0
+            state_of_charge = 0
             if soc_registers and len(soc_registers) == 2:
-                soc = soc_registers[1]
-                logger.debug(f"Raw SoC registers: {soc_registers}, using value: {soc}")
+                state_of_charge = soc_registers[1]
+                logger.debug(f"Raw SoC registers: {soc_registers}, using value: {state_of_charge}")
+
+            # Read charging/discharging status
+            charging_registers = await self.read_sma_register(self.registers['battery_charging'])
+            discharging_registers = await self.read_sma_register(self.registers['battery_discharging'])
+
+            # Read active charging mode (U32 ENUM)
+            charge_mode_registers = await self.read_sma_register(self.registers['battery_charge_mode'])
+            charging_mode = None
+            if charge_mode_registers and len(charge_mode_registers) == 2:
+                charge_mode_value = self.decode_u32_enum(charge_mode_registers)
+                if charge_mode_value is not None:
+                    charging_mode = BatteryChargingMode.from_value(charge_mode_value)
+                    logger.debug(f"Battery charging mode raw: {charge_mode_registers}, "
+                               f"decoded: {charge_mode_value}, "
+                               f"mode: {charging_mode.description if charging_mode else 'Unknown'}")
 
             # Read grid power
-            grid_registers = await self.read_sma_register(self.registers['grid_power'])
+            grid_power_registers = await self.read_sma_register(self.registers['grid_power'])
             grid_power = 0
-            if grid_registers and len(grid_registers) == 2:
-                grid_power = self.decode_s32(grid_registers)
+            if grid_power_registers and len(grid_power_registers) == 2:
+                grid_power = self.decode_s32(grid_power_registers)
 
             # Read house consumption
-            pv_registers = await self.read_sma_register(self.registers['pv_power'])
-            pv_power = 0
-            if pv_registers and len(pv_registers) == 2:
-                pv_power = self.decode_s32(pv_registers)
+            pv_power_registers = await self.read_sma_register(self.registers['pv_power'])
+            house_consumption = 0
+            if pv_power_registers and len(pv_power_registers) == 2:
+                house_consumption = self.decode_s32(pv_power_registers)
 
             # Read solar generation
-            solar_registers = await self.read_sma_register(self.registers['solar_power'])
-            solar_power = 0
-            if solar_registers and len(solar_registers) == 2:
-                solar_power = self.decode_s32(solar_registers)
+            solar_power_registers = await self.read_sma_register(self.registers['solar_power'])
+            solar_generation = 0
+            if solar_power_registers and len(solar_power_registers) == 2:
+                solar_generation = self.decode_s32(solar_power_registers)
 
-            # Read mode register
-            mode_registers = await self.read_sma_register(self.registers['battery_mode'], count=2)
-            logger.debug(f"Mode registers: {mode_registers}")
+            # Calculate total house consumption
+            total_house_consumption = grid_power + solar_generation - house_consumption
+
+            # Read mode register (U32 ENUM)
+            mode_registers = await self.read_sma_register(self.registers['battery_mode'])
+            battery_mode = BatteryMode.NORMAL  # Default to NORMAL
+
+            if mode_registers and len(mode_registers) == 2:
+                mode_value = self.decode_u32_enum(mode_registers)
+                if mode_value == 802:  # Active mode
+                    # Need to check power registers to determine exact mode
+                    power_registers = await self.read_sma_register(self.registers['battery_power'])
+                    if power_registers and len(power_registers) == 2:
+                        if power_registers[0] == 65535:  # Charging
+                            battery_mode = BatteryMode.FAST_CHARGE
+                        elif power_registers[0] == 0 and power_registers[1] > 0:  # Discharging
+                            battery_mode = BatteryMode.FAST_DISCHARGE
+                        else:  # No power set
+                            battery_mode = BatteryMode.PAUSE
+                elif mode_value == 803:  # Inactive mode
+                    battery_mode = BatteryMode.NORMAL
+
+                logger.debug(f"Battery mode registers: {mode_registers}, "
+                           f"decoded value: {mode_value}, "
+                           f"determined mode: {battery_mode.name}")
 
             # Read power register to determine specific mode
-            power_registers = await self.read_sma_register(self.registers['battery_power'], count=2)
+            power_registers = await self.read_sma_register(self.registers['battery_power'])
             logger.debug(f"Power registers: {power_registers}")
 
             # Determine mode using both mode and power registers
-            mode = BatteryMode.from_registers(mode_registers, power_registers)
-            logger.debug(f"Determined mode: {mode.name}")
+            battery_mode = BatteryMode.from_registers(mode_registers, power_registers)
+            logger.debug(f"Determined mode: {battery_mode.name}")
 
             # Calculate actual power value
-            power = 0
+            battery_power = 0
             if power_registers and len(power_registers) == 2:
                 if power_registers[0] == 65535:  # Charging
-                    power = 65535 - power_registers[1]
+                    battery_power = 65535 - power_registers[1]
                 elif power_registers[0] == 0:    # Discharging
-                    power = -power_registers[1]
+                    battery_power = -power_registers[1]
+
+            # Add charging status to debug output
+            if self.debug_level >= DebugLevel.DETAILED:
+                logger.debug(f"Battery status from registers - "
+                           f"Charging: {charging_registers[1] if charging_registers else 'N/A'}, "
+                           f"Discharging: {discharging_registers[1] if discharging_registers else 'N/A'}")
 
             return BatteryStatus(
-                soc=soc,
-                power=power,
-                mode=mode,
-                target_power=power,
-                is_charging=power > 0,
+                soc=state_of_charge,
+                power=battery_power,
+                mode=battery_mode,
+                target_power=battery_power,
+                is_charging=battery_power > 0,
                 temperature=0,
                 grid_power=grid_power,
-                pv_power=pv_power,
-                solar_power=solar_power
+                pv_power=house_consumption,
+                solar_power=solar_generation,
+                charging_mode=charging_mode
             )
 
         except Exception as e:
@@ -487,32 +604,14 @@ class SmartEnergyController:
             return None
 
     async def set_battery_mode(self, mode: BatteryMode, power: int = 0) -> bool:
-        """Set battery operation mode"""
+        """Set battery mode and power"""
         try:
-            # Get the actual mode name for logging
             mode_name = BatteryMode.get_mode_name(mode, power)
-            logger.info(f"Setting battery to {mode_name} mode" + (f" with {abs(power)}W" if power != 0 else ""))
+            logger.info(f"Setting battery to {mode_name} mode" +
+                       (f" with {abs(power)}W" if power != 0 else ""))
 
-            # First check current mode
-            current_mode = await self.read_sma_register(self.registers['battery_mode'], count=2)
-            logger.debug(f"Current mode registers: {current_mode}")
-
-            if BatteryMode.is_auto_mode(current_mode):
-                logger.info("Disabling AUTO mode first...")
-                result = self.sma_client.write_registers(
-                    address=self.registers['battery_mode'],
-                    values=[0, 802],
-                    slave=self.sma_unit_id
-                )
-
-                if result.isError():
-                    logger.error(f"Failed to disable AUTO mode: {result}")
-                    return False
-
-                await asyncio.sleep(5)
-
-            # Set mode values
-            mode_values = [255, 65533] if mode == BatteryMode.AUTO else [0, mode.value]
+            # Set mode values - NORMAL mode can use either [0, 803] or [255, 65533]
+            mode_values = [0, mode.value]
             logger.debug(f"Writing mode registers: values={mode_values}")
 
             mode_result = self.sma_client.write_registers(
@@ -674,7 +773,7 @@ class SmartEnergyController:
 
             elif battery.soc <= self.min_soc:
                 logger.info("Emergency charging needed - battery below minimum")
-                await self.set_battery_mode(BatteryMode.GRID_CHARGE, 1500)
+                await self.set_battery_mode(BatteryMode.FAST_CHARGE, 1500)
 
             elif in_best_window:
                 # Calculate optimal charging power based on price position and SoC
@@ -687,7 +786,7 @@ class SmartEnergyController:
                     f"Charging at {power}W during optimal window "
                     f"(price position: {best_window['relative_position']*100:.0f}% above min)"
                 )
-                await self.set_battery_mode(BatteryMode.GRID_CHARGE, power)
+                await self.set_battery_mode(BatteryMode.FAST_CHARGE, power)
 
             else:
                 logger.info("Normal operation - waiting for better prices")
